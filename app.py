@@ -3,142 +3,101 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Hardware BOM Reformatter", page_icon="⚡", layout="centered"
+    page_title="KiCad to Mouser BOM Exporter", page_icon="⚡", layout="centered"
 )
 
-st.title("⚡ KiCad & Excel to Mouser BOM")
+st.title("⚡ KiCad XML to Mouser BOM")
 st.markdown(
-    "Upload your **KiCad XML BOM export** (`.xml`) or an **Excel file** to instantly generate a clean import file for Mouser."
+    "Upload your **KiCad XML BOM export** (`.xml`) to instantly aggregate parts, map your part numbers, and download a ready-to-use CSV for Mouser's Rapid BOM tool."
 )
 
-uploaded_file = st.file_uploader(
-    "Choose a file", type=["xlsx", "xls", "xml"]
-)
+uploaded_file = st.file_uploader("Choose a KiCad XML file", type=["xml"])
 
 if uploaded_file is not None:
-  file_extension = uploaded_file.name.split(".")[-1].lower()
-  df = None
-
   try:
-    if file_extension in ["xlsx", "xls"]:
-      df = pd.read_excel(uploaded_file)
-      st.success("Excel file successfully loaded!")
+    # Parse KiCad XML BOM
+    tree = ET.parse(uploaded_file)
+    root = tree.getroot()
 
-    elif file_extension == "xml":
-      # Parse KiCad XML BOM
-      tree = ET.parse(uploaded_file)
-      root = tree.getroot()
-
-      components = []
-      for comp in root.findall(".//components/component"):
-        ref = comp.get("ref")
-        value = (
-            comp.find("value").text if comp.find("value") is not None else ""
-        )
-        footprint = (
-            comp.find("footprint").text
-            if comp.find("footprint") is not None
-            else ""
-        )
-
-        # Extract fields (looking for part numbers)
-        fields_dict = {}
-        fields_elem = comp.find("fields")
-        if fields_elem is not None:
-          for field in fields_elem.findall("field"):
-            field_name = field.get("name")
-            fields_dict[field_name] = field.text
-
-        components.append({
-            "Reference": ref,
-            "Value": value,
-            "Footprint": footprint,
-            **fields_dict,
-        })
-
-      raw_df = pd.DataFrame(components)
-      st.success(
-          f"KiCad XML successfully parsed! Found {len(raw_df)} components."
-      )
-      st.write("### Raw Components Preview:")
-      st.dataframe(raw_df.head())
-
-      # Field mapping for KiCad
-      st.write("---")
-      st.write("### Select Part Number Field")
-      available_fields = raw_df.columns.tolist()
-
-      # Try to guess the part number field
-      default_idx = 0
-      for candidate in [
-          "MFG_PN",
-          "Manufacturer Part Number",
-          "Mouser",
-          "Part Number",
-          "Value",
-      ]:
-        if candidate in available_fields:
-          default_idx = available_fields.index(candidate)
-          break
-
-      mpn_field = st.selectbox(
-          "Column/Field containing the Manufacturer Part Number",
-          available_fields,
-          index=default_idx,
+    components = []
+    for comp in root.findall(".//components/component"):
+      ref = comp.get("ref")
+      value = comp.find("value").text if comp.find("value") is not None else ""
+      footprint = (
+          comp.find("footprint").text
+          if comp.find("footprint") is not None
+          else ""
       )
 
-      # Group identical parts to calculate quantities
+      # Extract custom fields (where part numbers like Mouser or MFG PN are stored)
+      fields_dict = {}
+      fields_elem = comp.find("fields")
+      if fields_elem is not None:
+        for field in fields_elem.findall("field"):
+          field_name = field.get("name")
+          fields_dict[field_name] = field.text
+
+      components.append(
+          {"Reference": ref, "Value": value, "Footprint": footprint, **fields_dict}
+      )
+
+    raw_df = pd.DataFrame(components)
+    st.success(
+        f"KiCad XML successfully parsed! Found {len(raw_df)} total components."
+    )
+
+    st.write("### Raw Components Preview:")
+    st.dataframe(raw_df.head())
+
+    st.write("---")
+    st.write("### Field Selection")
+    available_fields = raw_df.columns.tolist()
+
+    # Intelligently guess the part number field
+    default_idx = 0
+    for candidate in [
+        "MFG_PN",
+        "Manufacturer Part Number",
+        "Mouser",
+        "Mouser Part Number",
+        "Part Number",
+        "Value",
+    ]:
+      if candidate in available_fields:
+        default_idx = available_fields.index(candidate)
+        break
+
+    mpn_field = st.selectbox(
+        "Select the Field/Column containing your Manufacturer or Supplier Part Numbers:",
+        available_fields,
+        index=default_idx,
+    )
+
+    if st.button("Generate Mouser BOM"):
+      # Clean data and group identical part numbers to sum quantities
+      clean_df = raw_df.copy()
+      clean_df[mpn_field] = clean_df[mpn_field].astype(str).str.strip()
+
+      # Drop rows where part number is empty or nan
+      clean_df = clean_df[
+          clean_df[mpn_field].notna() & (clean_df[mpn_field] != "nan")
+      ]
+
       grouped = (
-          raw_df.groupby(mpn_field)
+          clean_df.groupby(mpn_field)
           .size()
           .reset_index(name="Quantity")
           .rename(columns={mpn_field: "Manufacturer Part Number"})
       )
-      # Reorder columns for Mouser
-      df = grouped[["Quantity", "Manufacturer Part Number"]]
 
-    if df is not None and file_extension in ["xlsx", "xls"]:
-      st.write("### Preview of Raw Data:")
-      st.dataframe(df.head())
-
-      columns = df.columns.tolist()
-      col1, col2 = st.columns(2)
-      with col1:
-        qty_col = st.selectbox(
-            "Quantity Column",
-            columns,
-            index=0 if "Quantity" not in columns else columns.index("Quantity"),
-        )
-      with col2:
-        mpn_col = st.selectbox(
-            "Part Number Column",
-            columns,
-            index=(
-                1
-                if len(columns) > 1 and "Part Number" not in columns
-                else (
-                    columns.index("Part Number")
-                    if "Part Number" in columns
-                    else 0
-                )
-            ),
-        )
-
-      df = pd.DataFrame({
-          "Quantity": df[qty_col],
-          "Manufacturer Part Number": df[mpn_col],
-      })
-
-    if st.button("Generate Mouser BOM"):
-      df["Manufacturer Part Number"] = (
-          df["Manufacturer Part Number"].astype(str).str.strip()
-      )
+      # Mouser expects Quantity first, then Part Number
+      mouser_df = grouped[["Quantity", "Manufacturer Part Number"]]
 
       st.write("---")
       st.write("### Formatted BOM Preview for Mouser:")
-      st.dataframe(df)
+      st.dataframe(mouser_df)
 
-      csv_data = df.to_csv(index=False).encode("utf-8")
+      csv_data = mouser_df.to_csv(index=False).encode("utf-8")
 
       st.download_button(
           label="📥 Download Formatted CSV for Mouser",
@@ -148,4 +107,4 @@ if uploaded_file is not None:
       )
 
   except Exception as e:
-    st.error(f"Error processing file: {e}")
+    st.error(f"Error processing KiCad XML file: {e}")
